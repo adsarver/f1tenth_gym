@@ -85,6 +85,7 @@ class EnvRenderer(pyglet.window.Window):
 
         # current env map
         self.map_points = None
+        self.map_vertex_list = None
         
         # current env agent poses, (num_agents, 3), columns are (x, y, theta)
         self.poses = None
@@ -149,9 +150,29 @@ class EnvRenderer(pyglet.window.Window):
         map_mask = map_img == 0.0
         map_mask_flat = map_mask.flatten()
         map_points = 50. * map_coords[:, map_mask_flat].T
-        for i in range(map_points.shape[0]):
-            self.batch.add(1, GL_POINTS, None, ('v3f/stream', [map_points[i, 0], map_points[i, 1], map_points[i, 2]]), ('c3B/stream', [183, 193, 222]))
+
+        if self.map_vertex_list is not None:
+            self.map_vertex_list.delete()
+            self.map_vertex_list = None
+
         self.map_points = map_points
+        num_points = self.map_points.shape[0]
+
+        if num_points > 0:            
+            # Flatten the (N, 3) points array to (N*3) for pyglet
+            map_points_flat = self.map_points.flatten()
+            
+            # Create a matching color array (N*3)
+            map_colors = [183, 193, 222] * num_points
+
+            # Add to batch and store the returned VertexList
+            self.map_vertex_list = self.batch.add(
+                num_points,
+                GL_POINTS,
+                None,  # No texture group
+                ('v3f/stream', map_points_flat),
+                ('c3B/stream', map_colors)
+            )
 
     def on_resize(self, width, height):
         """
@@ -266,7 +287,7 @@ class EnvRenderer(pyglet.window.Window):
         Returns:
             None
         """
-
+        super().clear()
         # if map and poses doesn't exist, raise exception
         if self.map_points is None:
             raise Exception('Map not set for renderer.')

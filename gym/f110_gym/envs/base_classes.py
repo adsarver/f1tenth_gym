@@ -550,7 +550,7 @@ class Simulator(object):
         self.collisions, self.collision_idx = collision_multiple(all_vertices)
 
 
-    def step(self, control_inputs):
+    def step(self, control_inputs, agent_idxs=None):
         """
         Steps the simulation environment
 
@@ -560,25 +560,24 @@ class Simulator(object):
         Returns:
             observations (dict): dictionary for observations: poses of agents, current laser scan of each agent, collision indicators, etc.
         """
-
-
+        
         agent_scans = []
+        
+        if agent_idxs is None:
+            agent_idxs = range(self.num_agents)
 
-        # looping over agents
-        for i, agent in enumerate(self.agents):
-            # update each agent's pose
+        for i in agent_idxs:
+            agent = self.agents[i]
             current_scan = agent.update_pose(control_inputs[i, 0], control_inputs[i, 1])
             agent_scans.append(current_scan)
-
-            # update sim's information of agent poses
+            
             self.agent_poses[i, :] = np.append(agent.state[0:2], agent.state[4])
-
-        # check collisions between all agents
+            
         self.check_collision()
-
-        for i, agent in enumerate(self.agents):
-            # update agent's information on other agents
-            opp_poses = np.concatenate((self.agent_poses[0:i, :], self.agent_poses[i+1:, :]), axis=0)
+        
+        for i, agent_idx in enumerate(agent_idxs):
+            agent = self.agents[agent_idx]
+            opp_poses = np.concatenate((self.agent_poses[0:agent_idx, :], self.agent_poses[agent_idx+1:, :]), axis=0)
             agent.update_opp_poses(opp_poses)
 
             # update each agent's current scan based on other agents
@@ -586,8 +585,8 @@ class Simulator(object):
 
             # update agent collision with environment
             if agent.in_collision:
-                self.collisions[i] = 1.
-
+                self.collisions[agent_idx] = 1.
+                
         # fill in observations
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
         # collision_angles is removed from observations
@@ -599,9 +598,12 @@ class Simulator(object):
             'linear_vels_x': [],
             'linear_vels_y': [],
             'ang_vels_z': [],
-            'collisions': self.collisions}
-        for i, agent in enumerate(self.agents):
-            observations['scans'].append(agent_scans[i])
+            'collisions': self.collisions[agent_idxs],}
+        
+        for i, agent_idx in enumerate(agent_idxs):
+            agent = self.agents[agent_idx]
+            agent_scan = agent_scans[i]
+            observations['scans'].append(agent_scan)
             observations['poses_x'].append(agent.state[0])
             observations['poses_y'].append(agent.state[1])
             observations['poses_theta'].append(agent.state[4])
@@ -611,7 +613,7 @@ class Simulator(object):
 
         return observations
 
-    def reset(self, poses):
+    def reset(self, poses, agent_idxs=None):
         """
         Resets the simulation environment by given poses
 
@@ -624,7 +626,10 @@ class Simulator(object):
         
         if poses.shape[0] != self.num_agents:
             raise ValueError('Number of poses for reset does not match number of agents.')
+        
+        if agent_idxs is None:
+            agent_idxs = range(self.num_agents)
 
         # loop over poses to reset
-        for i in range(self.num_agents):
-            self.agents[i].reset(poses[i, :])
+        for agent_idx in agent_idxs:
+            self.agents[agent_idx].reset(poses[agent_idx, :])

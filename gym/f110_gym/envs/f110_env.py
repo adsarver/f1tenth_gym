@@ -217,7 +217,7 @@ class F110Env(gym.Env):
         # TODO: switch to maybe s-based
         left_t = 2
         right_t = 2
-        
+
         poses_x = np.array(self.poses_x)-self.start_xs
         poses_y = np.array(self.poses_y)-self.start_ys
         delta_pt = np.dot(self.start_rot, np.stack((poses_x, poses_y), axis=0))
@@ -260,7 +260,7 @@ class F110Env(gym.Env):
         self.poses_theta = obs_dict['poses_theta']
         self.collisions = obs_dict['collisions']
 
-    def step(self, action):
+    def step(self, action, agent_idxs=None):
         """
         Step function for the gym env
 
@@ -275,11 +275,22 @@ class F110Env(gym.Env):
         """
         
         # call simulation step
-        obs = self.sim.step(action)
-        obs['lap_times'] = self.lap_times
-        obs['lap_counts'] = self.lap_counts
-
-        F110Env.current_obs = obs
+        obs = self.sim.step(action, agent_idxs)
+        
+        if agent_idxs is not None:
+            obs['lap_times'] = self.lap_times[agent_idxs]
+            obs['lap_counts'] = self.lap_counts[agent_idxs]
+            for k, v in obs.items():
+                if isinstance(v, np.ndarray):
+                    F110Env.current_obs[k][agent_idxs] = v
+                if isinstance(v, list):
+                    for i, idx in enumerate(agent_idxs):
+                        F110Env.current_obs[k][idx] = v[i]
+            obs = F110Env.current_obs
+        else:
+            obs['lap_times'] = self.lap_times
+            obs['lap_counts'] = self.lap_counts
+            F110Env.current_obs = obs
 
         self.render_obs = {
             'ego_idx': obs['ego_idx'],
@@ -303,7 +314,7 @@ class F110Env(gym.Env):
 
         return obs, reward, done, info
 
-    def reset(self, poses):
+    def reset(self, poses, agent_idxs=None):
         """
         Reset the gym environment by given poses
 
@@ -316,6 +327,34 @@ class F110Env(gym.Env):
             done (bool): if the simulation is done
             info (dict): auxillary information dictionary
         """
+        if agent_idxs is not None:
+            if isinstance(agent_idxs, int):
+                agent_idxs = [agent_idxs]
+                
+            for agent_idx in agent_idxs:
+                self.collisions[agent_idx] = 0
+                self.near_starts[agent_idx] = True
+                self.toggle_list[agent_idx] = 0
+                
+                # reset start positions
+                self.start_xs[agent_idx] = poses[agent_idx, 0]
+                self.start_ys[agent_idx] = poses[agent_idx, 1]
+                self.start_thetas[agent_idx] = poses[agent_idx, 2]
+                
+            self.sim.reset(poses, agent_idxs)
+            
+            action = np.zeros((self.num_agents, 2))
+            obs, reward, done, info = self.step(action, agent_idxs)
+            self.render_obs = {
+                'ego_idx': obs['ego_idx'],
+                'poses_x': obs['poses_x'],
+                'poses_y': obs['poses_y'],
+                'poses_theta': obs['poses_theta'],
+                'lap_times': obs['lap_times'],
+                'lap_counts': obs['lap_counts']
+                }
+            return obs, reward, done, info
+        
         # reset counters and data members
         self.current_time = 0.0
         self.collisions = np.zeros((self.num_agents, ))
@@ -358,8 +397,11 @@ class F110Env(gym.Env):
 
         Returns:
             None
-        """
-        self.sim.set_map(map_path, map_ext)
+        """        
+        self.map_name = map_path.replace(".yaml", "")
+        self.map_ext = map_ext
+        self.sim.set_map(map_path + ".yaml", map_ext)
+        F110Env.renderer.update_map(self.map_name, self.map_ext)
 
     def update_params(self, params, index=-1):
         """
