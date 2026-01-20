@@ -37,6 +37,70 @@ from f110_gym.envs.dynamic_models import vehicle_dynamics_st, pid
 from f110_gym.envs.laser_models import ScanSimulator2D, check_ttc_jit, ray_cast
 from f110_gym.envs.collision_models import get_vertices, collision_multiple
 
+@njit(cache=True)
+def resolve_collision(state1, state2, mass, restitution=0.1):
+    """
+    Resolve collision between two agents using impulse-based physics
+    
+    Args:
+        state1, state2 (np.ndarray(7,)): vehicle states [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
+        mass (float): mass of vehicles (assumed equal)
+        restitution (float): coefficient of restitution (0=perfectly inelastic, 1=perfectly elastic)
+    
+    Returns:
+        new_vel1, new_vel2 (float): updated velocities for both vehicles
+    """
+    # Extract positions and velocities
+    pos1 = state1[0:2]
+    pos2 = state2[0:2]
+    vel1 = state1[3]
+    vel2 = state2[3]
+    yaw1 = state1[4]
+    yaw2 = state2[4]
+    
+    # Velocity vectors in world frame
+    vel1_vec = np.array([vel1 * np.cos(yaw1), vel1 * np.sin(yaw1)])
+    vel2_vec = np.array([vel2 * np.cos(yaw2), vel2 * np.sin(yaw2)])
+    
+    # Collision normal (from agent1 to agent2)
+    collision_normal = pos2 - pos1
+    dist = np.sqrt(collision_normal[0]**2 + collision_normal[1]**2)
+    
+    if dist < 1e-6:  # Avoid division by zero
+        return vel1, vel2
+    
+    collision_normal = collision_normal / dist
+    
+    # Relative velocity
+    rel_vel = vel1_vec - vel2_vec
+    
+    # Velocity along collision normal
+    vel_along_normal = rel_vel[0] * collision_normal[0] + rel_vel[1] * collision_normal[1]
+    
+    # Don't resolve if velocities are separating
+    if vel_along_normal > 0:
+        return vel1, vel2
+    
+    # Calculate impulse magnitude (inelastic collision)
+    impulse_magnitude = -(1.0 + restitution) * vel_along_normal / 2.0
+    
+    # Apply impulse
+    impulse = impulse_magnitude * collision_normal
+    
+    # Update velocity vectors
+    new_vel1_vec = vel1_vec + impulse
+    new_vel2_vec = vel2_vec - impulse
+    
+    # Convert back to scalar velocities (magnitude in direction of heading)
+    # Project onto current heading direction
+    heading1 = np.array([np.cos(yaw1), np.sin(yaw1)])
+    heading2 = np.array([np.cos(yaw2), np.sin(yaw2)])
+    
+    new_vel1 = new_vel1_vec[0] * heading1[0] + new_vel1_vec[1] * heading1[1]
+    new_vel2 = new_vel2_vec[0] * heading2[0] + new_vel2_vec[1] * heading2[1]
+    
+    return new_vel1, new_vel2
+
 class Integrator(Enum):
     RK4 = 1
     Euler = 2
@@ -195,6 +259,7 @@ class RaceCar(object):
         self.steer_angle_vel = 0.0
         # clear collision indicator
         self.in_collision = False
+        self.collision_type = 0
         # clear state
         self.state = np.zeros((7, ))
         self.state[0:2] = pose[0:2]
@@ -242,13 +307,8 @@ class RaceCar(object):
         
         in_collision = check_ttc_jit(current_scan, self.state[3], self.scan_angles, self.cosines, self.side_distances, self.ttc_thresh)
 
-        # if in collision stop vehicle
-        if in_collision:
-            self.state[3:] = 0.
-            self.accel = 0.0
-            self.steer_angle_vel = 0.0
-
-        # update state
+        # Mark collision but don't stop vehicle here - let collision response handle it
+        # This allows proper physics response for different collision types
         self.in_collision = in_collision
 
         return in_collision
@@ -267,8 +327,9 @@ class RaceCar(object):
 
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
         
-        # If vehicle is in collision, prevent physics update to keep it stopped
-        if self.in_collision:
+        # If vehicle is in WALL collision, prevent physics update to keep it stopped
+        # Agent collisions allow movement (pushing physics)
+        if self.collision_type == 1:  # Wall collision only
             # Generate scan without updating pose
             scan_x = self.state[0] + self.lidar_dist*np.cos(self.state[4])
             scan_y = self.state[1] + self.lidar_dist*np.sin(self.state[4])
@@ -577,6 +638,9 @@ class Simulator(object):
 
         for i in agent_idxs:
             agent = self.agents[i]
+            # Don't reset collision_type - let it persist from previous step
+            # Wall collisions (type 1) will keep vehicle frozen
+            # Agent collisions (type 2) will be re-detected below
             current_scan = agent.update_pose(control_inputs[i, 0], control_inputs[i, 1])
             agent_scans.append(current_scan)
             
@@ -584,6 +648,112 @@ class Simulator(object):
             
         # Check for agent-to-agent collisions (sets collision = 2 if agent collision)
         self.check_collision()
+        
+        # Apply collision response for agent-to-agent collisions
+        # Track which agents have been processed to avoid double-processing
+        processed = set()
+        
+        for agent_idx in agent_idxs:
+            if self.collisions[agent_idx] == 2. and agent_idx not in processed:  # Agent collision detected
+                other_idx = int(self.collision_idx[agent_idx])
+                
+                if other_idx >= 0:  # Valid collision partner
+                    # Get states directly (avoid copy)
+                    state1 = self.agents[agent_idx].state
+                    state2 = self.agents[other_idx].state
+                    
+                    # Calculate separation vector
+                    dx = state2[0] - state1[0]
+                    dy = state2[1] - state1[1]
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    
+                    if dist > 1e-6:  # Avoid division by zero
+                        # Normalize collision normal
+                        nx = dx / dist
+                        ny = dy / dist
+                        
+                        # Approximate vehicle radius (diagonal of bounding box / 2)
+                        vehicle_radius = np.sqrt(self.params['length']**2 + self.params['width']**2) / 2.0
+                        overlap = 2.0 * vehicle_radius - dist
+                        
+                        if overlap > 0:  # Agents are overlapping
+                            # Separate agents by moving them apart
+                            sep_dist = overlap / 2.0
+                            state1[0] -= nx * sep_dist
+                            state1[1] -= ny * sep_dist
+                            state2[0] += nx * sep_dist
+                            state2[1] += ny * sep_dist
+                            
+                            # Update agent poses after separation
+                            self.agent_poses[agent_idx, 0:2] = state1[0:2]
+                            self.agent_poses[other_idx, 0:2] = state2[0:2]
+                        
+                        # Physics-based collision response using mass and friction
+                        vel1 = state1[3]
+                        vel2 = state2[3]
+                        yaw1 = state1[4]
+                        yaw2 = state2[4]
+                        
+                        # Velocity vectors
+                        v1x = vel1 * np.cos(yaw1)
+                        v1y = vel1 * np.sin(yaw1)
+                        v2x = vel2 * np.cos(yaw2)
+                        v2y = vel2 * np.sin(yaw2)
+                        
+                        # Relative velocity along collision normal
+                        dvx = v1x - v2x
+                        dvy = v1y - v2y
+                        vel_along_normal = dvx * nx + dvy * ny
+                        
+                        # Only apply impulse if approaching
+                        if vel_along_normal > 0:
+                            # Use vehicle mass for impulse calculation
+                            # Coefficient of restitution affected by friction coefficient
+                            # Lower friction = less energy retention
+                            mass = self.params['m']
+                            friction_factor = min(1.0, self.params['mu'] / 1.0)  # Normalized to default mu
+                            restitution = 0.1 * friction_factor  # Friction affects bounciness
+                            
+                            # Impulse magnitude for equal mass collision
+                            impulse = (1.0 + restitution) * vel_along_normal / 2.0
+                            
+                            # Apply friction-based damping to perpendicular velocity
+                            # Tangent direction (perpendicular to collision normal)
+                            tx = -ny
+                            ty = nx
+                            vel_tangent = dvx * tx + dvy * ty
+                            
+                            # Friction reduces tangential velocity difference
+                            friction_impulse = vel_tangent * self.params['mu'] * 0.1
+                            
+                            # Update velocities with impulse and friction
+                            v1x -= impulse * nx + friction_impulse * tx
+                            v1y -= impulse * ny + friction_impulse * ty
+                            v2x += impulse * nx + friction_impulse * tx
+                            v2y += impulse * ny + friction_impulse * ty
+                            
+                            # Project back to heading direction
+                            cos_yaw1 = np.cos(yaw1)
+                            sin_yaw1 = np.sin(yaw1)
+                            cos_yaw2 = np.cos(yaw2)
+                            sin_yaw2 = np.sin(yaw2)
+                            
+                            new_vel1 = v1x * cos_yaw1 + v1y * sin_yaw1
+                            new_vel2 = v2x * cos_yaw2 + v2y * sin_yaw2
+                            
+                            # Apply velocity limits from params
+                            state1[3] = np.clip(new_vel1, self.params['v_min'], self.params['v_max'])
+                            state2[3] = np.clip(new_vel2, self.params['v_min'], self.params['v_max'])
+                    
+                    # Mark both as processed
+                    processed.add(agent_idx)
+                    processed.add(other_idx)
+                    
+                    # Mark collision type
+                    self.agents[agent_idx].in_collision = True
+                    self.agents[other_idx].in_collision = True
+                    self.agents[agent_idx].collision_type = 2  # Agent collision
+                    self.agents[other_idx].collision_type = 2  # Agent collision
         
         for i, agent_idx in enumerate(agent_idxs):
             agent = self.agents[agent_idx]
@@ -597,6 +767,12 @@ class Simulator(object):
             # Only set wall collision if not already in agent-to-agent collision
             if agent.in_collision and self.collisions[agent_idx] == 0:
                 self.collisions[agent_idx] = 1.
+                # Wall collisions stop the vehicle completely
+                agent.state[3:] = 0.
+                agent.accel = 0.0
+                agent.steer_angle_vel = 0.0
+                agent.collision_type = 1
+                agent.steer_angle_vel = 0.0
                 
         # fill in observations
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
