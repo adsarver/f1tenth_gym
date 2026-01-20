@@ -203,8 +203,13 @@ def check_ttc_jit(scan, vel, scan_angles, cosines, side_distances, ttc_thresh):
         collision_angle (float): at which angle the collision happened
     """
     in_collision = False
+    num_beams = scan.shape[0]
+    
+    # Small margin to account for numerical precision and ensure collision persists
+    collision_margin = 0.1  # 10cm margin
+    
     if vel != 0.0:
-        num_beams = scan.shape[0]
+        # Check TTC when moving
         for i in range(num_beams):
             proj_vel = vel*cosines[i]
             ttc = (scan[i] - side_distances[i])/proj_vel
@@ -212,7 +217,12 @@ def check_ttc_jit(scan, vel, scan_angles, cosines, side_distances, ttc_thresh):
                 in_collision = True
                 break
     else:
-        in_collision = False
+        # When stationary, check if any scan beam is closer than side distance
+        # This ensures collision state persists when vehicle is stopped due to collision
+        for i in range(num_beams):
+            if scan[i] < (side_distances[i] + collision_margin):
+                in_collision = True
+                break
 
     return in_collision
 

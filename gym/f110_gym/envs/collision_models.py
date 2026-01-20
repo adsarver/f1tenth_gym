@@ -204,8 +204,8 @@ def collision_multiple(vertices):
             ij_collision = collision(vi, vj)
             # fill in results
             if ij_collision:
-                collisions[i] = 1.
-                collisions[j] = 1.
+                collisions[i] = 2.  # Agent collision = 2
+                collisions[j] = 2.  # Agent collision = 2
                 collision_idx[i] = j
                 collision_idx[j] = i
 

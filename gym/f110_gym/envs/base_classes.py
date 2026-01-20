@@ -266,6 +266,15 @@ class RaceCar(object):
         """
 
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
+        
+        # If vehicle is in collision, prevent physics update to keep it stopped
+        if self.in_collision:
+            # Generate scan without updating pose
+            scan_x = self.state[0] + self.lidar_dist*np.cos(self.state[4])
+            scan_y = self.state[1] + self.lidar_dist*np.sin(self.state[4])
+            scan_pose = np.array([scan_x, scan_y, self.state[4]])
+            current_scan = RaceCar.scan_simulator.scan(scan_pose, self.scan_rng)
+            return current_scan
 
         # steering delay
         steer = 0.
@@ -573,6 +582,7 @@ class Simulator(object):
             
             self.agent_poses[i, :] = np.append(agent.state[0:2], agent.state[4])
             
+        # Check for agent-to-agent collisions (sets collision = 2 if agent collision)
         self.check_collision()
         
         for i, agent_idx in enumerate(agent_idxs):
@@ -583,13 +593,15 @@ class Simulator(object):
             # update each agent's current scan based on other agents
             agent.update_scan(agent_scans, i)
 
-            # update agent collision with environment
-            if agent.in_collision:
+            # update agent collision with environment (wall collisions = 1)
+            # Only set wall collision if not already in agent-to-agent collision
+            if agent.in_collision and self.collisions[agent_idx] == 0:
                 self.collisions[agent_idx] = 1.
                 
         # fill in observations
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
-        # collision_angles is removed from observations
+        # collisions: 0 = no collision, 1 = wall collision, 2 = agent collision
+        # collision_idx: -1 = no agent collision, >= 0 = index of agent in collision with
         observations = {'ego_idx': self.ego_idx,
             'scans': [],
             'poses_x': [],
@@ -598,7 +610,8 @@ class Simulator(object):
             'linear_vels_x': [],
             'linear_vels_y': [],
             'ang_vels_z': [],
-            'collisions': self.collisions[agent_idxs],}
+            'collisions': self.collisions[agent_idxs],
+            'collision_idx': self.collision_idx[agent_idxs],}
         
         for i, agent_idx in enumerate(agent_idxs):
             agent = self.agents[agent_idx]
