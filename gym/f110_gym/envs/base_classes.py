@@ -705,14 +705,13 @@ class Simulator(object):
                         dvy = v1y - v2y
                         vel_along_normal = dvx * nx + dvy * ny
                         
-                        # Only apply impulse if approaching
+                        # Only apply impulse if approaching (prevents rubber banding)
                         if vel_along_normal > 0:
                             # Use vehicle mass for impulse calculation
-                            # Coefficient of restitution affected by friction coefficient
-                            # Lower friction = less energy retention
+                            # Coefficient of restitution - very low to prevent bouncing
                             mass = self.params['m']
                             friction_factor = min(1.0, self.params['mu'] / 1.0)  # Normalized to default mu
-                            restitution = 0.1 * friction_factor  # Friction affects bounciness
+                            restitution = 0.02 * friction_factor  # Very inelastic to prevent rubber banding
                             
                             # Impulse magnitude for equal mass collision
                             impulse = (1.0 + restitution) * vel_along_normal / 2.0
@@ -724,13 +723,20 @@ class Simulator(object):
                             vel_tangent = dvx * tx + dvy * ty
                             
                             # Friction reduces tangential velocity difference
-                            friction_impulse = vel_tangent * self.params['mu'] * 0.1
+                            friction_impulse = vel_tangent * self.params['mu'] * 0.15
                             
                             # Update velocities with impulse and friction
                             v1x -= impulse * nx + friction_impulse * tx
                             v1y -= impulse * ny + friction_impulse * ty
                             v2x += impulse * nx + friction_impulse * tx
                             v2y += impulse * ny + friction_impulse * ty
+                            
+                            # Add damping to reduce oscillations (prevents rubber banding)
+                            damping = 0.85
+                            v1x *= damping
+                            v1y *= damping
+                            v2x *= damping
+                            v2y *= damping
                             
                             # Project back to heading direction
                             cos_yaw1 = np.cos(yaw1)
@@ -786,6 +792,8 @@ class Simulator(object):
             'linear_vels_x': [],
             'linear_vels_y': [],
             'ang_vels_z': [],
+            'linear_accel_x': [],
+            'linear_accel_y': [],
             'collisions': self.collisions[agent_idxs],
             'collision_idx': self.collision_idx[agent_idxs],}
         
@@ -799,6 +807,8 @@ class Simulator(object):
             observations['linear_vels_x'].append(agent.state[3])
             observations['linear_vels_y'].append(0.)
             observations['ang_vels_z'].append(agent.state[5])
+            observations['linear_accel_x'].append(agent.accel)
+            observations['linear_accel_y'].append(0.)
 
         return observations
 
