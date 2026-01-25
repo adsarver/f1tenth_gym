@@ -157,6 +157,12 @@ class F110Env(gym.Env):
             self.lidar_dist = kwargs['lidar_dist']
         except:
             self.lidar_dist = 0.0
+        
+        # rendering option to show agent IDs
+        try:
+            self.show_agent_ids = kwargs['show_agent_ids']
+        except:
+            self.show_agent_ids = False
 
         # radius to consider done
         self.start_thresh = 0.5  # 10cm
@@ -443,7 +449,7 @@ class F110Env(gym.Env):
         if F110Env.renderer is None:
             # first call, initialize everything
             from f110_gym.envs.rendering import EnvRenderer
-            F110Env.renderer = EnvRenderer(WINDOW_W, WINDOW_H)
+            F110Env.renderer = EnvRenderer(WINDOW_W, WINDOW_H, show_agent_ids=self.show_agent_ids)
             F110Env.renderer.update_map(self.map_name, self.map_ext)
             
         F110Env.renderer.update_obs(self.render_obs)

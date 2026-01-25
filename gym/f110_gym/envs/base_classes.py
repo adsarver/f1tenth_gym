@@ -161,6 +161,10 @@ class RaceCar(object):
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
         self.state = np.zeros((7, ))
 
+        # world-frame velocities (calculated from position changes)
+        self.world_vel = np.zeros((2, ))  # [vx, vy] in world frame
+        self.prev_pos = np.zeros((2, ))  # previous position for velocity calculation
+
         # pose of opponents in the world
         self.opp_poses = None
 
@@ -264,6 +268,9 @@ class RaceCar(object):
         self.state = np.zeros((7, ))
         self.state[0:2] = pose[0:2]
         self.state[4] = pose[2]
+        # reset world velocities
+        self.world_vel = np.zeros((2, ))
+        self.prev_pos = pose[0:2].copy()
         self.steer_buffer = np.empty((0, ))
         # reset scan random generator
         self.scan_rng = np.random.default_rng(seed=self.seed)
@@ -326,16 +333,6 @@ class RaceCar(object):
         """
 
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
-        
-        # If vehicle is in WALL collision, prevent physics update to keep it stopped
-        # Agent collisions allow movement (pushing physics)
-        if self.collision_type == 1:  # Wall collision only
-            # Generate scan without updating pose
-            scan_x = self.state[0] + self.lidar_dist*np.cos(self.state[4])
-            scan_y = self.state[1] + self.lidar_dist*np.sin(self.state[4])
-            scan_pose = np.array([scan_x, scan_y, self.state[4]])
-            current_scan = RaceCar.scan_simulator.scan(scan_pose, self.scan_rng)
-            return current_scan
 
         # steering delay
         steer = 0.
@@ -472,6 +469,11 @@ class RaceCar(object):
             self.state[4] = self.state[4] - 2*np.pi
         elif self.state[4] < 0:
             self.state[4] = self.state[4] + 2*np.pi
+
+        # calculate world-frame velocities from position changes
+        current_pos = self.state[0:2]
+        self.world_vel = (current_pos - self.prev_pos) / self.time_step
+        self.prev_pos = current_pos.copy()
 
         # update scan
         scan_x = self.state[0] + self.lidar_dist*np.cos(self.state[4])
@@ -638,9 +640,8 @@ class Simulator(object):
 
         for i in agent_idxs:
             agent = self.agents[i]
-            # Don't reset collision_type - let it persist from previous step
-            # Wall collisions (type 1) will keep vehicle frozen
-            # Agent collisions (type 2) will be re-detected below
+            # Reset collision type each step - will be set again if collision detected
+            agent.collision_type = 0
             current_scan = agent.update_pose(control_inputs[i, 0], control_inputs[i, 1])
             agent_scans.append(current_scan)
             
@@ -707,14 +708,17 @@ class Simulator(object):
                         
                         # Only apply impulse if approaching (prevents rubber banding)
                         if vel_along_normal > 0:
-                            # Use vehicle mass for impulse calculation
+                            # Get masses for both agents (may be different)
+                            mass1 = self.agents[agent_idx].params['m']
+                            mass2 = self.agents[other_idx].params['m']
+                            
                             # Coefficient of restitution - very low to prevent bouncing
-                            mass = self.params['m']
                             friction_factor = min(1.0, self.params['mu'] / 1.0)  # Normalized to default mu
                             restitution = 0.02 * friction_factor  # Very inelastic to prevent rubber banding
                             
-                            # Impulse magnitude for equal mass collision
-                            impulse = (1.0 + restitution) * vel_along_normal / 2.0
+                            # Impulse magnitude for potentially different masses
+                            # J = (1 + e) * v_rel / (1/m1 + 1/m2)
+                            impulse_magnitude = (1.0 + restitution) * vel_along_normal / (1.0/mass1 + 1.0/mass2)
                             
                             # Apply friction-based damping to perpendicular velocity
                             # Tangent direction (perpendicular to collision normal)
@@ -726,10 +730,12 @@ class Simulator(object):
                             friction_impulse = vel_tangent * self.params['mu'] * 0.15
                             
                             # Update velocities with impulse and friction
-                            v1x -= impulse * nx + friction_impulse * tx
-                            v1y -= impulse * ny + friction_impulse * ty
-                            v2x += impulse * nx + friction_impulse * tx
-                            v2y += impulse * ny + friction_impulse * ty
+                            # Agent 1: subtract impulse (direction is from 1 to 2)
+                            v1x -= (impulse_magnitude / mass1) * nx + friction_impulse * tx
+                            v1y -= (impulse_magnitude / mass1) * ny + friction_impulse * ty
+                            # Agent 2: add impulse
+                            v2x += (impulse_magnitude / mass2) * nx + friction_impulse * tx
+                            v2y += (impulse_magnitude / mass2) * ny + friction_impulse * ty
                             
                             # Add damping to reduce oscillations (prevents rubber banding)
                             damping = 0.85
@@ -773,12 +779,38 @@ class Simulator(object):
             # Only set wall collision if not already in agent-to-agent collision
             if agent.in_collision and self.collisions[agent_idx] == 0:
                 self.collisions[agent_idx] = 1.
-                # Wall collisions stop the vehicle completely
-                agent.state[3:] = 0.
-                agent.accel = 0.0
-                agent.steer_angle_vel = 0.0
                 agent.collision_type = 1
-                agent.steer_angle_vel = 0.0
+                
+                # Penetration correction: move agent back and project velocity along wall
+                state = agent.state
+                
+                # Move back to previous valid position
+                state[0:2] = agent.prev_pos
+                self.agent_poses[agent_idx, 0:2] = agent.prev_pos
+                
+                # Get world-frame velocity
+                vx = agent.world_vel[0]
+                vy = agent.world_vel[1]
+                vel_mag = np.sqrt(vx*vx + vy*vy)
+                
+                if vel_mag > 1e-6:
+                    # Collision normal points opposite to velocity (away from wall)
+                    nx = -vx / vel_mag
+                    ny = -vy / vel_mag
+                    
+                    # Velocity component perpendicular to wall (remove this)
+                    vel_normal = vx * nx + vy * ny
+                    
+                    # Only remove component going into wall
+                    if vel_normal < 0:
+                        # Remove normal component, keep tangential (slide along wall)
+                        vx -= vel_normal * nx
+                        vy -= vel_normal * ny
+                        
+                        # Project back to vehicle heading direction
+                        yaw = state[4]
+                        new_vel = vx * np.cos(yaw) + vy * np.sin(yaw)
+                        state[3] = np.clip(new_vel, self.params['v_min'], self.params['v_max'])
                 
         # fill in observations
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]

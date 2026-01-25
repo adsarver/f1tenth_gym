@@ -205,22 +205,28 @@ def check_ttc_jit(scan, vel, scan_angles, cosines, side_distances, ttc_thresh):
     in_collision = False
     num_beams = scan.shape[0]
     
-    # Small margin to account for numerical precision and ensure collision persists
-    collision_margin = 0.1  # 10cm margin
+    # Distance threshold - if any beam detects wall closer than vehicle edge, we're colliding
+    distance_thresh = 0.02  # 2cm safety margin beyond vehicle edge
     
     if vel != 0.0:
-        # Check TTC when moving
+        # Check both TTC and distance when moving
         for i in range(num_beams):
-            proj_vel = vel*cosines[i]
-            ttc = (scan[i] - side_distances[i])/proj_vel
-            if (ttc < ttc_thresh) and (ttc >= 0.0):
+            # Distance check - more reliable than TTC alone
+            if scan[i] < (side_distances[i] + distance_thresh):
                 in_collision = True
                 break
+            
+            # TTC check for predictive collision
+            proj_vel = vel*cosines[i]
+            if proj_vel > 0:  # Only check if moving toward this beam direction
+                ttc = (scan[i] - side_distances[i])/proj_vel
+                if (ttc < ttc_thresh) and (ttc >= 0.0):
+                    in_collision = True
+                    break
     else:
-        # When stationary, check if any scan beam is closer than side distance
-        # This ensures collision state persists when vehicle is stopped due to collision
+        # When stationary, use distance check only
         for i in range(num_beams):
-            if scan[i] < (side_distances[i] + collision_margin):
+            if scan[i] < (side_distances[i] + distance_thresh):
                 in_collision = True
                 break
 

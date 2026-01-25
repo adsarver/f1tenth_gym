@@ -51,13 +51,14 @@ class EnvRenderer(pyglet.window.Window):
     """
     A window class inherited from pyglet.window.Window, handles the camera/projection interaction, resizing window, and rendering the environment
     """
-    def __init__(self, width, height, *args, **kwargs):
+    def __init__(self, width, height, show_agent_ids=False, *args, **kwargs):
         """
         Class constructor
 
         Args:
             width (int): width of the window
             height (int): height of the window
+            show_agent_ids (bool): whether to show agent IDs above cars
 
         Returns:
             None
@@ -92,6 +93,10 @@ class EnvRenderer(pyglet.window.Window):
 
         # current env agent vertices, (num_agents, 4, 2), 2nd and 3rd dimensions are the 4 corners in 2D
         self.vertices = None
+        
+        # agent ID display
+        self.show_agent_ids = show_agent_ids
+        self.agent_id_labels = []
 
         # current score label
         self.score_label = pyglet.text.Label(
@@ -312,9 +317,22 @@ class EnvRenderer(pyglet.window.Window):
 
         # Draw all batches
         self.batch.draw()
-        self.fps_display.draw()
+        
+        # Draw agent ID labels if enabled (in world space with agents)
+        if self.show_agent_ids:
+            for i, (label, pose) in enumerate(zip(self.agent_id_labels, self.poses)):
+                glPushMatrix()
+                # Translate to agent position and move up slightly
+                glTranslatef(pose[0] * 50., pose[1] * 50. + 20., 0.)
+                # Scale down text to world scale (labels are in pixel units)
+                glScalef(1.0, 1.0, 1.0)
+                label.draw()
+                glPopMatrix()
+        
         # Remove default modelview matrix
         glPopMatrix()
+        
+        self.fps_display.draw()
 
     def update_obs(self, obs):
         """
@@ -335,6 +353,7 @@ class EnvRenderer(pyglet.window.Window):
         num_agents = len(poses_x)
         if self.poses is None:
             self.cars = []
+            self.agent_id_labels = []
             for i in range(num_agents):
                 if i == self.ego_idx:
                     vertices_np = get_vertices(np.array([0., 0., 0.]), CAR_LENGTH, CAR_WIDTH)
@@ -346,12 +365,22 @@ class EnvRenderer(pyglet.window.Window):
                     vertices = list(vertices_np.flatten())
                     car = self.batch.add(4, GL_QUADS, None, ('v2f', vertices), ('c3B', [99, 52, 94, 99, 52, 94, 99, 52, 94, 99, 52, 94]))
                     self.cars.append(car)
+                
+                # Create agent ID label if enabled
+                if self.show_agent_ids:
+                    label = pyglet.text.Label(str(i),
+                                            font_size=18,
+                                            x=0, y=0,
+                                            anchor_x='center', anchor_y='center',
+                                            color=(255, 255, 255, 255))
+                    self.agent_id_labels.append(label)
 
         poses = np.stack((poses_x, poses_y, poses_theta)).T
         for j in range(poses.shape[0]):
             vertices_np = 50. * get_vertices(poses[j, :], CAR_LENGTH, CAR_WIDTH)
             vertices = list(vertices_np.flatten())
             self.cars[j].vertices = vertices
+        
         self.poses = poses
 
         self.score_label.text = 'Lap Time: {laptime:.2f}, Ego Lap Count: {count:.0f}'.format(laptime=obs['lap_times'][0], count=obs['lap_counts'][obs['ego_idx']])
